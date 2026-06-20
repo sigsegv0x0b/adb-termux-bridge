@@ -153,7 +153,7 @@ Same request format. Response is a chunked JSON stream:
 
 ### Why C, not Rust/Go/Python
 
-The bridge runs inside Termux on Android, which ships with a full GCC/Clang toolchain but no pre-installed Go or Rust cross-compilers. A single C file compiles in seconds with no dependencies beyond OpenSSL (already installed in Termux). C also gives precise control over memory, signals, and forking — all critical for a daemon that manages subprocesses.
+C produces a small (~50 KB dynamically linked, ~6 MB with static OpenSSL) and fast binary with no runtime overhead or garbage collection. Static linking is trivial — just `-l:libssl.a` — which allows the binary to run from `/data/local/tmp/` with zero dependencies beyond what the Android system provides (`libc.so`, `libdl.so`).
 
 ### Why custom HTTP, not libmicrohttpd or libcurl
 
