@@ -158,6 +158,16 @@ static void *handle_client(void *arg) {
     }
 
     long content_length = get_content_length(buf);
+
+    if (strcmp(path, "/api/upload") == 0 && strcmp(method, "POST") == 0) {
+        handle_upload(ssl, query, content_length);
+        SSL_shutdown(ssl);
+        SSL_free(ssl);
+        close(job->fd);
+        free(job);
+        return NULL;
+    }
+
     char body[REQUEST_BUF];
     size_t body_len = 0;
     read_body(ssl, content_length, body, sizeof(body), &body_len);

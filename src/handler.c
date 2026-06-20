@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <errno.h>
 #include <openssl/ssl.h>
 
 #define PACKAGE_VERSION "0.1.0"
@@ -130,7 +131,7 @@ static void handle_exec_stream(SSL *ssl, const char *body, size_t body_len) {
     json_free(req);
 }
 
-static void handle_upload(SSL *ssl, const char *query, const char *body, size_t body_len) {
+void handle_upload(SSL *ssl, const char *query, long content_length) {
     const char *path = NULL;
     if (startswith(query, "path=")) path = query + 5;
 
@@ -142,12 +143,22 @@ static void handle_upload(SSL *ssl, const char *query, const char *body, size_t 
     FILE *f = fopen(path, "wb");
     if (!f) {
         char err[512];
-        snprintf(err, sizeof(err), "cannot open file: %s", path);
+        snprintf(err, sizeof(err), "cannot open file: %s (%s)", path, strerror(errno));
         send_error(ssl, 500, err);
         return;
     }
 
-    size_t written = fwrite(body, 1, body_len, f);
+    size_t written = 0;
+    char chunk[65536];
+    while (written < (size_t)content_length) {
+        size_t remaining = (size_t)content_length - written;
+        size_t to_read = remaining < sizeof(chunk) ? remaining : sizeof(chunk);
+        int n = SSL_read(ssl, chunk, to_read);
+        if (n <= 0) break;
+        size_t w = fwrite(chunk, 1, n, f);
+        written += w;
+        if (w != (size_t)n) break;
+    }
     fclose(f);
 
     json_value_t *r = json_new_object();
@@ -230,8 +241,7 @@ int handle_request(SSL *ssl, const char *method, const char *path,
     }
 
     if (streq(path, "/api/upload") && streq(method, "POST")) {
-        handle_upload(ssl, query, body, body_len);
-        return 1;
+        return 0; // handled in server.c with streaming
     }
 
     if (streq(path, "/api/download") && streq(method, "GET")) {
