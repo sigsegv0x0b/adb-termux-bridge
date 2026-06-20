@@ -10,8 +10,9 @@ CURL_CA=""
 CURL_CERT=""
 CURL_KEY=""
 
-if [ $# -eq 0 ]; then
-    cat <<EOF
+case "${1:-}" in
+    --help|-h|help)
+        cat <<EOF
 Usage: adb-termux <command> [args...]
 
 Commands:
@@ -21,6 +22,7 @@ Commands:
   push <src> <dst>   Upload file to device (POST /api/upload)
   pull <src>         Download file from device (GET /api/download)
   health             Check bridge health (GET /api/health)
+  help               Show this help
 
 Environment:
   BRIDGE_PORT        Override port (default: 10099)
@@ -33,8 +35,9 @@ Examples:
   adb-termux pull /sdcard/file.txt > ~/file.txt
   adb-termux health
 EOF
-    exit 0
-fi
+        exit 0
+        ;;
+esac
 
 find_certs() {
     local fp_dir
