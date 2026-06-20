@@ -1,18 +1,79 @@
-# Termux ADB Bridge
+# adb-termux-bridge
 
-A lightweight HTTP-over-mTLS daemon that runs inside Termux, providing a REST API to execute arbitrary shell commands, stream output, upload, and download files on an Android device.
+A lightweight HTTP-over-mTLS daemon that is **injected via ADB and runs as the ADB shell UID (2000)**, providing a REST API on `127.0.0.1` to execute shell commands with ADB-level privileges — all accessible from Termux without a desktop.
+
+## What is this?
+
+```
+┌───────────────────────────────────────────────────┐
+│                   Android Device                   │
+│                                                   │
+│  ┌─────────────────────────────────────────────┐  │
+│  │  Termux (app UID)                          │  │
+│  │  ┌──────────────┐  ┌─────────────────────┐ │  │
+│  │  │ adb-termux   │  │ curl, scripts, etc. │ │  │
+│  │  │ shell pm     │  │ POST /api/exec      │ │  │
+│  │  │ list packages│  │ mTLS client certs   │ │  │
+│  │  └──────┬───────┘  └──────────┬──────────┘ │  │
+│  └─────────┼─────────────────────┼────────────┘  │
+│            │     loopback        │                │
+│            │   127.0.0.1:10099   │                │
+│  ┌─────────▼─────────────────────▼────────────┐  │
+│  │  Bridge daemon (UID 2000 — ADB shell)      │  │
+│  │  runs at /data/local/tmp/                  │  │
+│  │  injected via: adb shell setsid ./binary   │  │
+│  │                                            │  │
+│  │  Commands execute as UID 2000              │  │
+│  │  → pm, dumpsys, settings, input, content   │  │
+│  │  → same as running "adb shell <cmd>"       │  │
+│  └────────────────────────────────────────────┘  │
+└───────────────────────────────────────────────────┘
+```
 
 ## Why
 
-Termux on Android cannot use `/dev/binder` for Binder IPC (the kernel does not expose it to app processes), so the standard Android inter-process communication mechanism is unavailable. Additionally, Termux runs as a regular Android app process with no special privileges.
+Termux on Android runs as an unprivileged app (UID `u0_aXXX`). It cannot:
+- Run `pm`, `dumpsys`, `settings`, or other ADB shell commands
+- Access `/dev/binder` for Binder IPC (the kernel does not expose it to app processes)
+- Elevate privileges without external help
 
-This bridge solves both problems by:
+The standard workaround is to pair Termux with a desktop via `adb shell`, but that requires a USB cable or WiFi, and a desktop machine.
 
-1. Running as a daemon that listens on `127.0.0.1` (loopback only, no network exposure)
-2. Providing a REST API that any local process (including scripts) can call over TLS
-3. Using mutual TLS (mTLS) with ED25519 certificates so that only clients holding a CA-signed certificate can issue commands
+**This bridge flips the model**: instead of Termux reaching out to ADB, ADB injects a daemon into the device that Termux can talk to. The daemon runs at the `shell` UID (2000) — the same as `adb shell` — and executes commands with full ADB-level privileges.
 
-The bridge itself has no special privileges. It runs at the same UID as Termux. To perform privileged operations, pair it with ADB, `su`, or Shizuku.
+The result: **Termux gains the ability to run any ADB shell command programmatically, without a desktop, over loopback.**
+
+## How injection works
+
+The secure binary (`termux-adb-bridge-secure`) is a fully self-contained, statically-linked executable with embedded ED25519 certificates. It is deployed via:
+
+```
+adb connect <phone-ip>:<port>    # wireless debugging
+adb push termux-adb-bridge-secure /data/local/tmp/
+adb shell 'setsid /data/local/tmp/termux-adb-bridge-secure --daemon'
+```
+
+1. **`adb push`** places the binary in `/data/local/tmp/` (the ADB shell user's writable directory)
+2. **`adb shell`** starts the binary on the device
+3. **`setsid`** creates a new session — the daemon detaches from the ADB connection
+4. **`--daemon`** forks again — the parent exits, the child orphans to `init`
+5. The daemon now runs permanently as **UID 2000** (the ADB shell user), listening on `127.0.0.1:10099`
+6. On startup, it auto-extracts its embedded certs to `~/.termux-adb-bridge/certs/<fingerprint>/`
+
+Now any process on the device (Termux, scripts, apps) can call the daemon via `127.0.0.1:10099` with mTLS and execute commands at the ADB shell privilege level.
+
+## What you can do
+
+| Command | Equivalent ADB command |
+|---------|----------------------|
+| `adb-termux shell pm list packages` | `adb shell pm list packages` |
+| `adb-termux shell dumpsys battery` | `adb shell dumpsys battery` |
+| `adb-termux shell settings put global airplane_mode_on 1` | `adb shell settings put global airplane_mode_on 1` |
+| `adb-termux shell input keyevent 26` | `adb shell input keyevent 26` |
+| `adb-termux shell content query --uri content://settings/secure` | `adb shell content query ...` |
+| `adb-termux shell cmd wifi set-wifi-enabled 1` | `adb shell cmd wifi set-wifi-enabled 1` |
+
+Any command that works in `adb shell` works through the bridge.
 
 ## Architecture
 
@@ -30,6 +91,7 @@ The bridge itself has no special privileges. It runs at the same UID as Termux. 
          ▼
 ┌──────────────────────────┐
 │  termux-adb-bridge       │
+│  (UID 2000, /data/local) │
 │  ┌────────────────────┐  │
 │  │ SSL_CTX (mTLS)     │  │
 │  │ ├─ Server cert     │  │
@@ -99,7 +161,7 @@ The bridge serves exactly one concurrent client (loopback) with a tiny API surfa
 
 ### Why mTLS over plain TCP or SSH
 
-- **Plain TCP**: Anyone on the device could connect and issue arbitrary commands as Termux. The bridge binds to `127.0.0.1` only, but other apps on the same device can still connect to `127.0.0.1:10099`. mTLS ensures only whitelisted clients can talk to the bridge.
+- **Plain TCP**: Anyone on the device could connect and issue arbitrary commands as ADB shell. The bridge binds to `127.0.0.1` only, but other apps on the same device can still connect to `127.0.0.1:10099`. mTLS ensures only whitelisted clients can talk to the bridge.
 - **SSH**: SSH requires a user account, password/key management, and a separate SSH server. The bridge is a single binary that starts in under 10ms.
 - **mTLS with ED25519**: No passwords, no server-side session state. The client presents a certificate signed by the bridge's own CA. The bridge verifies the signature against its trusted CA cert. ED25519 keys are 32 bytes, signature verification is extremely fast, and OpenSSL supports them natively.
 
@@ -125,12 +187,13 @@ With a single daemon handling loopback clients, thread-per-connection is the sim
 ### Threat model
 
 The bridge trusts:
-- **The Termux user**: Can start/stop the bridge at will
-- **Clients holding a CA-signed certificate**: Can execute commands
+- **The ADB shell user (UID 2000)**: Injects and runs the binary
+- **Clients holding a CA-signed certificate**: Can execute commands as UID 2000
 - **localhost (`127.0.0.1`)**: The only interface the bridge listens on
 
 The bridge does **not** trust:
 - **Other apps on the device**: Blocked by mTLS (they need a signed client cert)
+- **Termux**: Despite being on the same device, Termux still needs a valid client cert to issue commands
 - **Remote network clients**: The bridge is not reachable from outside `127.0.0.1` unless port forwarding is set up
 - **ADB forward from desktop**: If `adb forward tcp:10099 tcp:10099` is used, the desktop client still needs a valid client cert
 
@@ -213,29 +276,49 @@ On startup, the bridge scans `/proc/<pid>/cmdline` for existing processes whose 
 - `SIGPIPE`: Ignored (handled gracefully by SSL_write return value)
 - `SIGINT`/`SIGTERM`: Sets a shutdown flag, stops the accept loop, and exits cleanly
 
-## Deployment
+## Quick start
 
-### On-device (Termux)
-
-```
-git clone <this repo>
-cd termux-adb-bridge
-./install.sh
-```
-
-`install.sh` builds the binary and generates certificates. The bridge can then be started with:
+### 1. Build on device (Termux)
 
 ```
-./termux-adb-bridge --daemon
+git clone https://github.com/sigsegv0x0b/adb-termux-bridge
+cd adb-termux-bridge
+pkg install openssl openssl-static
+make -j$(nproc)
+./termux-adb-bridge --init-certs
+make secure
 ```
 
-### Via ADB from desktop
+### 2. Enable wireless debugging
+
+On your phone: **Settings → Developer options → Wireless debugging** → enable it and note the IP:port.
+
+### 3. Inject
 
 ```
-bridge.sh install            # pushes binary + certs, starts daemon, sets up forward
-bridge.sh health             # check if running
-bridge.sh exec 'echo hi'     # run a command
+adb connect <phone-ip>:<port>
+./inject.sh
 ```
+
+This pushes the statically-linked secure binary to `/data/local/tmp/`, starts it as a daemon via `setsid`, and shows the certificate paths.
+
+### 4. Use adb-termux
+
+```
+alias adb-termux='$PWD/adb-termux.sh'
+adb-termux shell pm list packages
+adb-termux shell dumpsys battery
+adb-termux shell settings put global airplane_mode_on 1
+```
+
+## Scripts
+
+| Script | Description |
+|--------|-------------|
+| `inject.sh` | Push secure binary to device and start daemon |
+| `adb-termux.sh` | CLI wrapper that routes `shell`, `push`, `pull` through the bridge API |
+| `install.sh` | Build + generate certs (on-device) |
+| `bridge.sh` | Desktop-side deploy CLI |
 
 ## Dependencies
 
@@ -249,7 +332,7 @@ bridge.sh exec 'echo hi'     # run a command
 |--------|---------|-------------------|
 | Language | Java (C++ injector) | C |
 | IPC | Android Binder | HTTP + mTLS |
-| Privilege elevation | ADB shell + app_process | None (runs at Termux UID) |
+| Privilege elevation | ADB shell + app_process | Injected via ADB (runs at UID 2000) |
 | Certificates | None (UID-based auth) | ED25519 mTLS |
 | Process model | fork + setsid + app_process | fork + setsid + execve |
 | Dependencies | Android framework | OpenSSL only |
