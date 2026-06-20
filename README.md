@@ -159,11 +159,9 @@ C produces a small (~50 KB dynamically linked, ~6 MB with static OpenSSL) and fa
 
 The bridge serves exactly one concurrent client (loopback) with a tiny API surface. Adding a dependency on libmicrohttpd would pull in dozens of source files and complicate cross-builds. The HTTP parser in `server.c` is ~150 lines — it only needs to parse the request line, headers, and Content-Length.
 
-### Why mTLS over plain TCP or SSH
+### Why mTLS
 
-- **Plain TCP**: Anyone on the device could connect and issue arbitrary commands as ADB shell. The bridge binds to `127.0.0.1` only, but other apps on the same device can still connect to `127.0.0.1:10099`. mTLS ensures only whitelisted clients can talk to the bridge.
-- **SSH**: SSH requires a user account, password/key management, and a separate SSH server. The bridge is a single binary that starts in under 10ms.
-- **mTLS with ED25519**: No passwords, no server-side session state. The client presents a certificate signed by the bridge's own CA. The bridge verifies the signature against its trusted CA cert. ED25519 keys are 32 bytes, signature verification is extremely fast, and OpenSSL supports them natively.
+Only clients with a signed certificate can talk to the bridge — no passwords, no server-side state. The bridge never leaves `127.0.0.1`, so it's not network-reachable, but any process on the device can still reach loopback. mTLS ensures the bridge only trusts clients that present a cert signed by its own CA.
 
 ### Why ED25519, not RSA or ECDSA
 
