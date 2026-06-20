@@ -1,0 +1,8 @@
+obj/
+termux-adb-bridge
+termux-adb-bridge-secure
+src/certs_data.h
+*.o
+*.swp
+*~
+.TMPDIR/
