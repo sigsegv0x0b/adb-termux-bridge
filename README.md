@@ -219,38 +219,31 @@ CA (self-signed)
 
 The SHA-256 fingerprint of the server certificate identifies a specific bridge instance. Certs are saved to `<cert-dir>/<fingerprint>/` so multiple instances (or rebuilds) do not collide. When using the secure build, the fingerprint directory is created automatically on startup.
 
-## Build Modes
+## Build
 
-### Normal mode
-
-```
-make
-./termux-adb-bridge --init-certs
-./termux-adb-bridge
-```
-
-Certificates are loaded from `~/.termux-adb-bridge/certs/` at runtime. Useful for development and environments where the filesystem is available.
-
-### Secure mode
+Running `make` produces the secure binary by default:
 
 ```
 make
-./termux-adb-bridge --init-certs
-make secure
+# → termux-adb-bridge-secure  (statically linked, certs embedded)
 ```
 
-The `make secure` target:
-1. Builds the normal binary
-2. Saves all PEM files to `<cert-dir>/<fingerprint>/` via `--save-certs`
-3. Generates `src/certs_data.h` with all certs and keys as embedded DER byte arrays
-4. Rebuilds the binary as `termux-adb-bridge-secure` with `-DSECURE_BUILD`
+The build:
+1. Compiles the normal binary (`termux-adb-bridge`)
+2. Auto-generates ED25519 certificates on first build if missing
+3. Saves PEM files to `<cert-dir>/<fingerprint>/` via `--save-certs`
+4. Generates `src/certs_data.h` with all certs and keys as embedded DER byte arrays
+5. Rebuilds as `termux-adb-bridge-secure` with `-DSECURE_BUILD` and `-l:libssl.a` (static OpenSSL)
 
-The secure binary contains all cryptographic material baked in. It ignores the filesystem entirely — no PEM files need to be present at runtime. This is useful when:
-- Deploying to a read-only filesystem
-- You want to ensure the private key never appears on disk as a separate file
-- You want a single-file deployment
+The secure binary is fully self-contained with zero runtime dependencies. It extracts its certs to the fingerprint directory on startup.
 
-In secure mode, `--cert`, `--ca`, and `--save-certs` still work — they extract the embedded certs and save them to disk. Server startup also auto-saves to the fingerprint directory.
+### Targets
+
+| Target | Output | Description |
+|--------|--------|-------------|
+| `make` (default) | `termux-adb-bridge-secure` | Static binary with embedded certs |
+| `make normal` | `termux-adb-bridge` | Dynamic binary (PEM files at runtime) |
+| `make clean` | — | Remove build artifacts |
 
 ## Process Lifecycle
 
@@ -282,10 +275,10 @@ On startup, the bridge scans `/proc/<pid>/cmdline` for existing processes whose 
 git clone https://github.com/sigsegv0x0b/adb-termux-bridge
 cd adb-termux-bridge
 pkg install openssl openssl-static
-make -j$(nproc)
-./termux-adb-bridge --init-certs
-make secure
+make
 ```
+
+This builds the secure binary (`termux-adb-bridge-secure`) — a statically-linked daemon with ED25519 certificates baked in. Certs are auto-generated on the first build.
 
 ### 2. Enable wireless debugging
 
