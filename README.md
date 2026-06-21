@@ -2,6 +2,18 @@
 
 A lightweight HTTP-over-mTLS daemon that is **injected via ADB and runs as the ADB shell UID (2000)**, providing a REST API on `127.0.0.1` to execute shell commands with ADB-level privileges — all accessible from Termux without a desktop.
 
+## Quick start (one command)
+
+```bash
+git clone https://github.com/sigsegv0x0b/adb-termux-bridge
+cd adb-termux-bridge
+./fullsetup.sh
+```
+
+This installs all dependencies, builds the secure binary, detects your device's IP, prompts for the ADB port, connects via wireless debugging, and injects the bridge. After it finishes, the bridge is running and ready to use — no desktop required.
+
+For manual setup or per-script workflows, see the [Quick start](#quick-start) and [Scripts](#scripts) sections below.
+
 ## What is this?
 
 ```
@@ -120,11 +132,15 @@ All requests require mTLS. Only clients presenting a certificate signed by the b
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/api/health` | Returns `{"status":"ok","version":"0.1.0"}` |
+| `GET` | `/api/health` | Returns `{"status":"ok","version":"...","uptime_seconds":N}` |
+| `GET` | `/api/uptime` | Returns `{"uptime_seconds":N,"uptime_human":"..."}` |
+| `GET` | `/api/certinfo` | Returns CA PEM, client cert PEM, and SHA-256 fingerprint |
 | `POST` | `/api/exec` | Execute command, return full output |
 | `POST` | `/api/exec/stream` | Execute command, stream output as it arrives |
+| `POST` | `/api/exec/pipe?command=<cmd>&raw=0&env_KEY=VAL` | Execute with piped stdin/stdout over SSE or raw binary |
 | `POST` | `/api/upload?path=<remote>` | Upload file to device |
 | `GET` | `/api/download?path=<remote>` | Download file from device |
+| `POST` | `/api/update?sha256=<hex>` | Self-update — upload new binary, server atomically swaps and restarts |
 
 ### `/api/exec`
 
@@ -147,6 +163,67 @@ Same request format. Response is a chunked JSON stream:
 ```
 {"stdout":"hello\n"}
 {"exit_code":0}
+```
+
+### `/api/exec/pipe`
+
+Execute a command with bi-directional stdin/stdout over a persistent connection. The command is passed as a URL-encoded query parameter. Supports optional `env_*` parameters for environment variables and `raw=1` for binary passthrough.
+
+Request:
+```
+POST /api/exec/pipe?command=cat%20%3E%2Fsdcard%2Fout.txt&raw=1
+Content-Length: 0
+```
+
+Pipe data via stdin; stdout/stderr are streamed back. In SSE mode (default), stderr is tagged with `data: [STDERR] ...` and a final `data: {"exit_code":N}` signals completion. In raw mode (`raw=1`), stdout and stderr are multiplexed raw with no framing, suitable for binary data.
+
+### `/api/upload`
+
+Upload a file to the device. The request body is the raw file content.
+
+Request:
+```
+POST /api/upload?path=/sdcard/file.txt
+Content-Type: application/octet-stream
+
+<binary file data>
+```
+
+### `/api/update`
+
+Self-update the running bridge. Send the new binary as the request body with its SHA-256 checksum as a query parameter. The server validates the checksum, atomically replaces its own binary, and `execv()`s the new version — no downtime injection needed.
+
+Request:
+```
+POST /api/update?sha256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+Content-Type: application/octet-stream
+
+<new binary data>
+```
+
+### `/api/certinfo`
+
+Returns the bridge's CA certificate in PEM, the client certificate in PEM, and the SHA-256 fingerprint of the CA.
+
+Response:
+```json
+{
+  "ca_pem": "-----BEGIN CERTIFICATE-----\n...",
+  "client_cert_pem": "-----BEGIN CERTIFICATE-----\n...",
+  "fingerprint": "aa742f560e5b10c00aab60cee135e9699498a0480740afcc25f779a2944246fb"
+}
+```
+
+### `/api/uptime`
+
+Returns the bridge's uptime in seconds and a human-readable string.
+
+Response:
+```json
+{
+  "uptime_seconds": 3600,
+  "uptime_human": "1h 0m 0s"
+}
 ```
 
 ## Design Choices
@@ -291,7 +368,13 @@ adb connect <phone-ip>:<port>
 ./inject.sh
 ```
 
-This pushes the statically-linked secure binary to `/data/local/tmp/`, starts it as a daemon via `setsid`, and shows the certificate paths.
+This pushes the statically-linked secure binary to `/data/local/tmp/`, starts it as a daemon via `setsid`, and shows the certificate paths. Offline devices are automatically ignored — only devices in the `device` ADB state are targeted.
+
+To re-start the daemon later without rebuilding or re-pushing (binary must already be on device):
+
+```
+./start.sh
+```
 
 ### 4. Use adb-termux
 
@@ -302,12 +385,26 @@ adb-termux shell dumpsys battery
 adb-termux shell settings put global airplane_mode_on 1
 ```
 
+Stream a command's output in real time:
+```
+adb-termux stream logcat -d
+```
+
+Pipe data to/from a command on the device:
+```
+echo data | adb-termux pipe 'cat > /sdcard/file'
+adb-termux pipe 'dd if=/dev/block/mmcblk0 bs=4k count=100' > backup.img
+```
+
 ## Scripts
 
 | Script | Description |
 |--------|-------------|
-| `inject.sh` | Push secure binary to device and start daemon |
-| `adb-termux.sh` | CLI wrapper that routes `shell`, `push`, `pull` through the bridge API |
+| `fullsetup.sh` | One-command setup: install deps, build, detect IP, connect ADB, inject |
+| `inject.sh` | Push secure binary to device and start daemon (ignores offline devices) |
+| `start.sh` | Start daemon on device assuming binary is already deployed (no build/push) |
+| `update.sh` | Hot-swap a new binary on a running bridge via `/api/update` |
+| `adb-termux.sh` | CLI wrapper that routes `shell`, `push`, `pull`, `pipe`, `stream`, `health`, `uptime` through the bridge API |
 | `install.sh` | Build + generate certs (on-device) |
 | `bridge.sh` | Desktop-side deploy CLI |
 
