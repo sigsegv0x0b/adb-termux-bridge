@@ -273,9 +273,13 @@ for dir in up down; do
     test_raw_pipe "raw pipe" 1048576   "$dir"
 done
 
-# 17) Self-update endpoint
-echo "17) self-update: send binary, verify restart"
+# 17) Self-update endpoint — verify restart via uptime reset
+echo "17) self-update: send binary, verify restart via uptime"
 sha=$(sha256sum "$BINARY" | cut -d' ' -f1)
+# Get uptime before update
+resp_before=$(curl -s --cacert "$CA_CERT" --cert "$CLIENT_CERT" --key "$CLIENT_KEY" \
+    "$API/api/uptime" 2>/dev/null)
+uptime_before=$(json_num "$resp_before" "uptime_seconds")
 resp=$(curl -s --max-time 10 --cacert "$CA_CERT" --cert "$CLIENT_CERT" --key "$CLIENT_KEY" \
     -X POST --data-binary @"$BINARY" \
     "$API/api/update?sha256=${sha}" 2>/dev/null || true)
@@ -292,11 +296,40 @@ if echo "$resp" | grep -q '"status":"ok"' && echo "$resp" | grep -q '"message":"
     done
     if [[ "$updated" == "1" ]]; then
         pass "  self-update + restart (took $((i * 500))ms)"
+        # Verify uptime reset: after should be less than before
+        resp_after=$(curl -s --cacert "$CA_CERT" --cert "$CLIENT_CERT" --key "$CLIENT_KEY" \
+            "$API/api/uptime" 2>/dev/null)
+        uptime_after=$(json_num "$resp_after" "uptime_seconds")
+        if [[ "$uptime_after" -lt "$uptime_before" ]]; then
+            pass "  uptime reset: ${uptime_before}s -> ${uptime_after}s"
+        else
+            fail "  uptime did not reset: before=${uptime_before}s after=${uptime_after}s"
+        fi
     else
         fail "  self-update: server did not come back"
     fi
 else
     fail "  self-update: $resp"
+fi
+
+# 18) Uptime endpoint
+echo "18) uptime endpoint"
+resp=$(curl -s --cacert "$CA_CERT" --cert "$CLIENT_CERT" --key "$CLIENT_KEY" \
+    "$API/api/uptime" 2>/dev/null)
+if echo "$resp" | grep -q '"uptime_seconds"' && echo "$resp" | grep -q '"uptime_human"'; then
+    pass "  $resp"
+else
+    fail "  $resp"
+fi
+
+# 19) Health includes uptime
+echo "19) health includes uptime"
+resp=$(curl -s --cacert "$CA_CERT" --cert "$CLIENT_CERT" --key "$CLIENT_KEY" \
+    "$API/api/health" 2>/dev/null)
+if echo "$resp" | grep -q '"uptime_seconds"'; then
+    pass "  $resp"
+else
+    fail "  $resp"
 fi
 
 echo ""

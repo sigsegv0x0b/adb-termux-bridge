@@ -24,6 +24,7 @@ Commands:
   push <src> <dst>                    Upload file to device
   pull <src>                          Download file from device
   health                              Check bridge health
+  uptime                              Show server uptime
   --certinfo                          Show certificate info
   help                                Show this help
 
@@ -325,6 +326,11 @@ case "$1" in
 
     health)
         curl_bridge GET "/api/health"
+        echo
+        ;;
+
+    uptime)
+        curl_bridge GET "/api/uptime"
         echo
         ;;
 

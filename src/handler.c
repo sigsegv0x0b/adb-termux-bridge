@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <time.h>
 #include <openssl/ssl.h>
 #include <openssl/evp.h>
 #include <openssl/pem.h>
@@ -17,12 +18,14 @@
 #define MAX_ENV 256
 
 static char g_cert_dir[1024] = "";
+static time_t g_start_time = 0;
 static char **g_argv = NULL;
 static int g_listen_fd = -1;
 
 void handler_set_cert_dir(const char *dir) {
     strncpy(g_cert_dir, dir, sizeof(g_cert_dir) - 1);
     g_cert_dir[sizeof(g_cert_dir) - 1] = '\0';
+    g_start_time = time(NULL);
 }
 
 void handler_set_argv(char **argv) {
@@ -545,12 +548,37 @@ static void handle_download(SSL *ssl, const char *query) {
 }
 
 static void handle_health(SSL *ssl) {
+    time_t uptime = time(NULL) - g_start_time;
+    if (uptime < 0) uptime = 0;
     cJSON *r = cJSON_CreateObject();
     cJSON_AddStringToObject(r, "status", "ok");
     cJSON_AddStringToObject(r, "version", PACKAGE_VERSION);
+    cJSON_AddNumberToObject(r, "uptime_seconds", (double)uptime);
     char *s = cJSON_PrintUnformatted(r);
     send_json(ssl, 200, s);
     free(s);
+    cJSON_Delete(r);
+}
+
+static void handle_uptime(SSL *ssl) {
+    time_t uptime = time(NULL) - g_start_time;
+    if (uptime < 0) uptime = 0;
+    int d = (int)(uptime / 86400);
+    int h = (int)((uptime % 86400) / 3600);
+    int m = (int)((uptime % 3600) / 60);
+    int s = (int)(uptime % 60);
+    char human[64];
+    if (d > 0)      snprintf(human, sizeof(human), "%dd %dh %dm %ds", d, h, m, s);
+    else if (h > 0) snprintf(human, sizeof(human), "%dh %dm %ds", h, m, s);
+    else if (m > 0) snprintf(human, sizeof(human), "%dm %ds", m, s);
+    else            snprintf(human, sizeof(human), "%ds", s);
+
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddNumberToObject(r, "uptime_seconds", (double)uptime);
+    cJSON_AddStringToObject(r, "uptime_human", human);
+    char *js = cJSON_PrintUnformatted(r);
+    send_json(ssl, 200, js);
+    free(js);
     cJSON_Delete(r);
 }
 
@@ -586,6 +614,11 @@ int handle_request(SSL *ssl, const char *method, const char *path,
 
     if (streq(path, "/api/certinfo") && streq(method, "GET")) {
         handle_certinfo(ssl);
+        return 1;
+    }
+
+    if (streq(path, "/api/uptime") && streq(method, "GET")) {
+        handle_uptime(ssl);
         return 1;
     }
 
