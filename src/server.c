@@ -184,6 +184,20 @@ static void *handle_client(void *arg) {
         return NULL;
     }
 
+    if (strcmp(path, "/api/update") == 0 && strcmp(method, "POST") == 0) {
+        int ok = handle_update(ssl, query, content_length);
+        // handle_update returns 1 if body was consumed (normal cleanup),
+        // 0 if body was not read (skip graceful SSL shutdown to avoid reset),
+        // or execv's (never returns on success)
+        if (ok) {
+            SSL_shutdown(ssl);
+        }
+        SSL_free(ssl);
+        close(job->fd);
+        free(job);
+        return NULL;
+    }
+
     int chunked = is_chunked(buf);
     if (strcmp(path, "/api/exec/pipe") == 0 && strcmp(method, "POST") == 0) {
         handle_exec_pipe(ssl, query, content_length, chunked);
@@ -251,7 +265,7 @@ static void kill_previous_instance(void) {
 }
 
 int server_start(server_t *sv) {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (fd < 0) { perror("socket"); return -1; }
 
     int opt = 1;
@@ -273,13 +287,16 @@ int server_start(server_t *sv) {
         perror("listen"); close(fd); return -1;
     }
 
+    sv->listen_fd = fd;
+    handler_set_listen_fd(fd);
+
     printf("Listening on %s:%d\n", sv->address, sv->port);
 
     sv->running = 1;
     while (sv->running) {
         struct sockaddr_in client_addr;
         socklen_t client_len = sizeof(client_addr);
-        int client_fd = accept(fd, (struct sockaddr*)&client_addr, &client_len);
+        int client_fd = accept4(fd, (struct sockaddr*)&client_addr, &client_len, SOCK_CLOEXEC);
         if (client_fd < 0) {
             if (errno == EINTR) continue;
             if (!sv->running) break;
@@ -297,6 +314,7 @@ int server_start(server_t *sv) {
     }
 
     close(fd);
+    sv->listen_fd = -1;
     printf("Server stopped\n");
     return 0;
 }

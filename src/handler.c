@@ -17,10 +17,20 @@
 #define MAX_ENV 256
 
 static char g_cert_dir[1024] = "";
+static char **g_argv = NULL;
+static int g_listen_fd = -1;
 
 void handler_set_cert_dir(const char *dir) {
     strncpy(g_cert_dir, dir, sizeof(g_cert_dir) - 1);
     g_cert_dir[sizeof(g_cert_dir) - 1] = '\0';
+}
+
+void handler_set_argv(char **argv) {
+    g_argv = argv;
+}
+
+void handler_set_listen_fd(int fd) {
+    g_listen_fd = fd;
 }
 
 static char *read_file(const char *path) {
@@ -269,6 +279,128 @@ void handle_upload(SSL *ssl, const char *query, long content_length) {
     send_json(ssl, 200, s);
     free(s);
     cJSON_Delete(r);
+}
+
+int handle_update(SSL *ssl, const char *query, long content_length) {
+    // Parse sha256 from query
+    char expected_sha[128] = "";
+    if (startswith(query, "sha256=")) {
+        strncpy(expected_sha, query + 7, sizeof(expected_sha) - 1);
+        expected_sha[sizeof(expected_sha) - 1] = '\0';
+        char *amp = strchr(expected_sha, '&');
+        if (amp) *amp = '\0';
+    }
+
+    if (strlen(expected_sha) != 64) {
+        send_error(ssl, 400, "missing or invalid sha256 query parameter (need 64 hex chars)");
+        return 0;
+    }
+
+    if (content_length <= 0) {
+        send_error(ssl, 400, "missing body (Content-Length required)");
+        return 1;
+    }
+
+    // Discover own binary path
+    char binary_path[4096];
+    ssize_t blen = readlink("/proc/self/exe", binary_path, sizeof(binary_path) - 1);
+    if (blen <= 0) {
+        send_error(ssl, 500, "cannot determine own binary path");
+        return 0;
+    }
+    binary_path[blen] = '\0';
+
+    // Write to temp file beside the binary (same filesystem for atomic rename)
+    char tmp_path[4096];
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", binary_path);
+
+    FILE *f = fopen(tmp_path, "wb");
+    if (!f) {
+        char err[512];
+        snprintf(err, sizeof(err), "cannot open temp file: %s (%s)", tmp_path, strerror(errno));
+        send_error(ssl, 500, err);
+        return 0;
+    }
+
+    // Stream body to temp file while computing SHA256
+    EVP_MD_CTX *mdctx = EVP_MD_CTX_new();
+    EVP_DigestInit_ex(mdctx, EVP_sha256(), NULL);
+
+    size_t written = 0;
+    char chunk[65536];
+    while (written < (size_t)content_length) {
+        size_t remaining = (size_t)content_length - written;
+        size_t to_read = remaining < sizeof(chunk) ? remaining : sizeof(chunk);
+        int n = SSL_read(ssl, chunk, to_read);
+        if (n <= 0) break;
+        size_t w = fwrite(chunk, 1, n, f);
+        if (w != (size_t)n) break;
+        EVP_DigestUpdate(mdctx, chunk, n);
+        written += w;
+    }
+
+    unsigned char md[EVP_MAX_MD_SIZE];
+    unsigned int md_len = 0;
+    EVP_DigestFinal_ex(mdctx, md, &md_len);
+    EVP_MD_CTX_free(mdctx);
+
+    if (written != (size_t)content_length) {
+        fclose(f);
+        unlink(tmp_path);
+        char err[128];
+        snprintf(err, sizeof(err), "short read: got %zu of %ld bytes", written, content_length);
+        send_error(ssl, 400, err);
+        return 1;
+    }
+
+    // Convert computed hash to hex
+    char computed_sha[65];
+    for (unsigned int i = 0; i < md_len; i++)
+        snprintf(computed_sha + i * 2, 3, "%02x", md[i]);
+    computed_sha[64] = '\0';
+
+    // Compare (case-insensitive)
+    if (strcasecmp(computed_sha, expected_sha) != 0) {
+        fclose(f);
+        unlink(tmp_path);
+        char err[256];
+        snprintf(err, sizeof(err), "checksum mismatch: expected %s, got %s", expected_sha, computed_sha);
+        send_error(ssl, 400, err);
+        return 1;
+    }
+
+    // Checksum matches — atomically replace the binary
+    fsync(fileno(f));
+    fclose(f);
+    chmod(tmp_path, 0755);
+
+    if (rename(tmp_path, binary_path) < 0) {
+        char err[512];
+        snprintf(err, sizeof(err), "rename failed: %s (%s)", binary_path, strerror(errno));
+        send_error(ssl, 500, err);
+        return 1;
+    }
+
+    // Send success response
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddStringToObject(r, "status", "ok");
+    cJSON_AddStringToObject(r, "message", "restarting");
+    cJSON_AddStringToObject(r, "sha256", computed_sha);
+    char *s = cJSON_PrintUnformatted(r);
+    send_json(ssl, 200, s);
+    free(s);
+    cJSON_Delete(r);
+
+    // Flush SSL, close everything, execv the new binary
+    SSL_shutdown(ssl);
+    SSL_free(ssl);
+    if (g_listen_fd >= 0) close(g_listen_fd);
+
+    execv(binary_path, g_argv);
+
+    // If execv returns, it failed
+    perror("execv");
+    exit(1);
 }
 
 void handle_exec_pipe(SSL *ssl, const char *query, long content_length, int chunked) {

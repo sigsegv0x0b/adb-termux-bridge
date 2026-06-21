@@ -273,6 +273,32 @@ for dir in up down; do
     test_raw_pipe "raw pipe" 1048576   "$dir"
 done
 
+# 17) Self-update endpoint
+echo "17) self-update: send binary, verify restart"
+sha=$(sha256sum "$BINARY" | cut -d' ' -f1)
+resp=$(curl -s --max-time 10 --cacert "$CA_CERT" --cert "$CLIENT_CERT" --key "$CLIENT_KEY" \
+    -X POST --data-binary @"$BINARY" \
+    "$API/api/update?sha256=${sha}" 2>/dev/null || true)
+if echo "$resp" | grep -q '"status":"ok"' && echo "$resp" | grep -q '"message":"restarting"'; then
+    # Poll health until new instance is back (up to 10 seconds)
+    updated=0
+    for i in $(seq 1 20); do
+        sleep 0.5
+        if curl -sf --cacert "$CA_CERT" --cert "$CLIENT_CERT" --key "$CLIENT_KEY" \
+            "$API/api/health" >/dev/null 2>&1; then
+            updated=1
+            break
+        fi
+    done
+    if [[ "$updated" == "1" ]]; then
+        pass "  self-update + restart (took $((i * 500))ms)"
+    else
+        fail "  self-update: server did not come back"
+    fi
+else
+    fail "  self-update: $resp"
+fi
+
 echo ""
 echo "=== Results ==="
 [[ $FAIL_COUNT -eq 0 ]] && echo "All tests passed!" || echo "$FAIL_COUNT test(s) failed"

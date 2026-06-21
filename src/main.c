@@ -9,6 +9,7 @@
 #include <pthread.h>
 
 static server_t g_server;
+static char **g_argv;
 static pthread_mutex_t g_shutdown_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_shutdown_cond = PTHREAD_COND_INITIALIZER;
 static int g_shutdown_flag = 0;
@@ -44,6 +45,7 @@ static void print_usage(const char *prog) {
 }
 
 int main(int argc, char *argv[]) {
+    g_argv = argv;
     const char *cert_dir = NULL;
     char default_cert_dir[1024];
     int daemon_mode = 0;
@@ -214,6 +216,8 @@ int main(int argc, char *argv[]) {
     }
 
     handler_set_cert_dir(cert_dir);
+    handler_set_argv(g_argv);
+    handler_set_listen_fd(-1);
     server_start(&g_server);
 
     SSL_CTX_free(ctx);
