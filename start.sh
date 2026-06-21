@@ -2,7 +2,6 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-BINARY="$SCRIPT_DIR/termux-adb-bridge-secure"
 LOCAL_CERT_DIR="$HOME/.termux-adb-bridge/certs"
 DEVICE_BINARY="/data/local/tmp/termux-adb-bridge-secure"
 PORT=10099
@@ -14,13 +13,14 @@ CURL_KEY=""
 
 usage() {
     cat <<EOF
-Usage: inject.sh [--kill|--status|--help]
+Usage: start.sh [--kill|--status|--help]
 
   --kill      Kill the running bridge on device
   --status    Check if bridge is running and exit
   --help      Show this help
 
-Default (no flags): inject the secure binary and start the bridge.
+Default (no flags): start the bridge on the device using the
+already-injected binary. Does not build or push. Run inject.sh first.
 EOF
     exit 0
 }
@@ -45,6 +45,21 @@ curl_bridge() {
         "https://${ADDR}:${PORT}${1}" 2>/dev/null
 }
 
+select_device() {
+    local offline
+    offline=$(adb devices | awk '$2=="offline"{print $1}')
+    if [ -n "$offline" ]; then
+        echo "Note: ignoring offline device(s): $offline" >&2
+    fi
+    DEVICE_SERIAL=$(adb devices | awk '$2=="device"{print $1; exit}')
+    if [ -z "$DEVICE_SERIAL" ]; then
+        echo "Error: no online device connected" >&2
+        echo "Connect via: adb connect <ip>:<port>" >&2
+        exit 1
+    fi
+    ADB_CMD=(adb -s "$DEVICE_SERIAL")
+}
+
 get_remote_pid() {
     "${ADB_CMD[@]}" shell 'pidof termux-adb-bridge-secure' 2>/dev/null | tr -d ' \n\r'
 }
@@ -53,12 +68,7 @@ get_remote_pid() {
 case "${1:-}" in
     --help|-h) usage ;;
     --kill)
-        DEVICE_SERIAL=$(adb devices | awk '$2=="device"{print $1; exit}')
-        if [ -z "$DEVICE_SERIAL" ]; then
-            echo "Error: no online device connected"
-            exit 1
-        fi
-        ADB_CMD=(adb -s "$DEVICE_SERIAL")
+        select_device
         pid=$(get_remote_pid)
         if [ -n "$pid" ]; then
             echo "Killing bridge (PID $pid)..."
@@ -85,13 +95,14 @@ if ! which adb >/dev/null 2>&1; then
     exit 1
 fi
 
-DEVICE_SERIAL=$(adb devices | awk '$2=="device"{print $1; exit}')
-if [ -z "$DEVICE_SERIAL" ]; then
-    echo "Error: no online device connected"
-    echo "Connect via: adb connect <ip>:<port>"
+select_device
+
+# --- Check binary exists on device ---
+if ! "${ADB_CMD[@]}" shell "test -x '$DEVICE_BINARY'" 2>/dev/null; then
+    echo "Error: $DEVICE_BINARY not found on device" >&2
+    echo "Run inject.sh first to deploy the bridge." >&2
     exit 1
 fi
-ADB_CMD=(adb -s "$DEVICE_SERIAL")
 
 # --- Check if already running ---
 find_certs || true
@@ -101,37 +112,11 @@ if curl_bridge "/api/health" >/dev/null 2>&1; then
         fp_dir=$(dirname "$CURL_CA")
         echo "  Certificates: $fp_dir"
     fi
-    read -p "Re-inject? [y/N] " answer
-    case "$answer" in
-        [yY]|[yY][eE][sS]) ;;
-        *)
-            echo "Exiting"
-            exit 0
-            ;;
-    esac
-    pid=$(get_remote_pid)
-    if [ -n "$pid" ]; then
-        echo "Killing existing bridge (PID $pid)..."
-        "${ADB_CMD[@]}" shell "kill $pid" 2>/dev/null || true
-        sleep 1
-    fi
+    exit 0
 fi
 
-# --- Build if needed ---
-if [ ! -f "$BINARY" ]; then
-    echo "Building secure binary..."
-    cd "$SCRIPT_DIR"
-    make clean 2>/dev/null || true
-    make -j$(nproc) 2>&1
-    make secure 2>&1
-fi
-
-# --- Push and start ---
-echo "Pushing binary to device..."
-"${ADB_CMD[@]}" push "$BINARY" /data/local/tmp/termux-adb-bridge-secure 2>&1
-"${ADB_CMD[@]}" shell chmod +x "$DEVICE_BINARY"
-
-echo "Starting daemon..."
+# --- Start daemon ---
+echo "Starting daemon on device $DEVICE_SERIAL..."
 "${ADB_CMD[@]}" shell "setsid $DEVICE_BINARY --daemon > /dev/null 2>&1 &"
 
 # --- Wait for health ---
@@ -160,6 +145,6 @@ if curl_bridge "/api/health" >/dev/null 2>&1; then
     echo "Use adb-termux to issue commands:"
     echo "  alias adb-termux='$SCRIPT_DIR/adb-termux.sh'"
 else
-    echo "Error: bridge did not start"
+    echo "Error: bridge did not start" >&2
     exit 1
 fi
