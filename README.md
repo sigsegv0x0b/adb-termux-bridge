@@ -12,7 +12,146 @@ cd adb-termux-bridge
 
 This installs all dependencies, builds the secure binary, detects your device's IP, prompts for the ADB port, connects via wireless debugging, and injects the bridge. After it finishes, the bridge is running and ready to use — no desktop required.
 
-For manual setup or per-script workflows, see the [Quick start](#quick-start) and [Scripts](#scripts) sections below.
+For manual setup or per-script workflows, see below.
+
+## Installation
+
+### Manual build
+
+```bash
+pkg install openssl openssl-static make clang
+git clone https://github.com/sigsegv0x0b/adb-termux-bridge
+cd adb-termux-bridge
+make
+```
+
+This builds `termux-adb-bridge-secure` — a statically-linked daemon with ED25519 certificates baked in. Certs are auto-generated on the first build.
+
+### Start the bridge
+
+Enable **Wireless debugging** on your phone: *Settings → Developer options → Wireless debugging*. Note the IP:port shown.
+
+```bash
+adb connect <phone-ip>:<port>
+./inject.sh
+```
+
+This pushes the secure binary to the device, starts it as a daemon, and shows the certificate paths. Offline devices are ignored — only devices in the `device` ADB state are targeted.
+
+To restart later without rebuilding or re-pushing (binary must already be on device):
+
+```bash
+./start.sh
+```
+
+## Usage examples
+
+All commands go through `adb-termux.sh`. Add an alias for convenience:
+
+```bash
+alias adb-termux='$PWD/adb-termux.sh'
+```
+
+### Shell commands
+
+Run any ADB shell command:
+
+```bash
+adb-termux shell pm list packages
+adb-termux shell dumpsys battery
+adb-termux shell settings put global airplane_mode_on 1
+adb-termux shell input keyevent 26
+adb-termux shell content query --uri content://settings/secure
+adb-termux shell cmd wifi set-wifi-enabled 1
+adb-termux shell dumpsys telephony.registry | grep mCallState
+```
+
+### Install an APK
+
+Push the APK to the device, then use `pm install`:
+
+```bash
+adb-termux push some-app.apk /data/local/tmp/some-app.apk
+adb-termux shell pm install /data/local/tmp/some-app.apk
+```
+
+Or pipe the APK directly to `pm install`:
+
+```bash
+cat some-app.apk | adb-termux pipe 'pm install -S $(wc -c < /proc/self/fd/0)'
+```
+
+### Push and pull files
+
+Upload a file:
+
+```bash
+adb-termux push ~/photo.jpg /sdcard/DCIM/photo.jpg
+```
+
+Download a file:
+
+```bash
+adb-termux pull /sdcard/DCIM/photo.jpg > ~/photo.jpg
+```
+
+Pipe data to a command on the device:
+
+```bash
+echo "hello from termux" | adb-termux pipe 'cat > /sdcard/hello.txt'
+```
+
+### Get device info
+
+```bash
+# Battery status
+adb-termux shell dumpsys battery
+
+# Network info
+adb-termux shell dumpsys connectivity
+
+# Installed packages
+adb-termux shell pm list packages | grep google
+
+# Device properties
+adb-termux shell getprop ro.build.version.release
+adb-termux shell getprop ro.product.model
+
+# Running processes
+adb-termux shell ps -A | head -20
+
+# WiFi status
+adb-termux shell dumpsys wifi | grep "Wi-Fi"
+
+# Screen resolution
+adb-termux shell wm size
+
+# Current time
+adb-termux shell date
+```
+
+### Stream output
+
+Watch logcat in real time:
+
+```bash
+adb-termux stream logcat -d
+```
+
+### Check bridge status
+
+```bash
+adb-termux health
+adb-termux uptime
+```
+
+### Update the bridge without restarting
+
+If the binary has been rebuilt, hot-swap it on the running bridge:
+
+```bash
+./update.sh
+```
 
 ## What is this?
 
@@ -343,58 +482,6 @@ On startup, the bridge scans `/proc/<pid>/cmdline` for existing processes whose 
 - `SIGHUP`: Ignored (daemon does not reload config)
 - `SIGPIPE`: Ignored (handled gracefully by SSL_write return value)
 - `SIGINT`/`SIGTERM`: Sets a shutdown flag, stops the accept loop, and exits cleanly
-
-## Quick start
-
-### 1. Build on device (Termux)
-
-```
-git clone https://github.com/sigsegv0x0b/adb-termux-bridge
-cd adb-termux-bridge
-pkg install openssl openssl-static
-make
-```
-
-This builds the secure binary (`termux-adb-bridge-secure`) — a statically-linked daemon with ED25519 certificates baked in. Certs are auto-generated on the first build.
-
-### 2. Enable wireless debugging
-
-On your phone: **Settings → Developer options → Wireless debugging** → enable it and note the IP:port.
-
-### 3. Inject
-
-```
-adb connect <phone-ip>:<port>
-./inject.sh
-```
-
-This pushes the statically-linked secure binary to `/data/local/tmp/`, starts it as a daemon via `setsid`, and shows the certificate paths. Offline devices are automatically ignored — only devices in the `device` ADB state are targeted.
-
-To re-start the daemon later without rebuilding or re-pushing (binary must already be on device):
-
-```
-./start.sh
-```
-
-### 4. Use adb-termux
-
-```
-alias adb-termux='$PWD/adb-termux.sh'
-adb-termux shell pm list packages
-adb-termux shell dumpsys battery
-adb-termux shell settings put global airplane_mode_on 1
-```
-
-Stream a command's output in real time:
-```
-adb-termux stream logcat -d
-```
-
-Pipe data to/from a command on the device:
-```
-echo data | adb-termux pipe 'cat > /sdcard/file'
-adb-termux pipe 'dd if=/dev/block/mmcblk0 bs=4k count=100' > backup.img
-```
 
 ## Scripts
 
