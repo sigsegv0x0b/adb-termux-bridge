@@ -41,12 +41,23 @@ static int connect_unix(const char *path) {
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+    socklen_t addrlen;
+
+    if (path[0] == '@') {
+        // Abstract socket: \0name
+        addr.sun_path[0] = '\0';
+        strncpy(addr.sun_path + 1, path + 1, sizeof(addr.sun_path) - 2);
+        addrlen = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + strlen(path + 1));
+    } else {
+        // Filesystem socket
+        strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+        addrlen = sizeof(addr);
+    }
 
     int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (fd < 0) return -1;
 
-    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+    if (connect(fd, (struct sockaddr *)&addr, addrlen) < 0) {
         close(fd);
         return -1;
     }
