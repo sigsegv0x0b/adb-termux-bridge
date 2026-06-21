@@ -2,7 +2,7 @@ CC      ?= gcc
 CFLAGS  ?= -Wall -Wextra -O2 -pthread -Isrc
 LDFLAGS ?= -lssl -lcrypto -pthread
 
-SRC := src/main.c src/server.c src/tls.c src/executor.c src/handler.c src/json.c
+SRC := src/main.c src/server.c src/tls.c src/executor.c src/handler.c src/cJSON.c
 TARGET := termux-adb-bridge
 TARGET_SECURE := termux-adb-bridge-secure
 

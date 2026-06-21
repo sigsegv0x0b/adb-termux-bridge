@@ -1,6 +1,6 @@
 #include "handler.h"
 #include "executor.h"
-#include "json.h"
+#include "cJSON.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,8 +9,58 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <openssl/ssl.h>
+#include <openssl/evp.h>
+#include <openssl/pem.h>
+#include <openssl/x509.h>
 
 #define PACKAGE_VERSION "0.1.0"
+#define MAX_ENV 256
+
+static char g_cert_dir[1024] = "";
+
+void handler_set_cert_dir(const char *dir) {
+    strncpy(g_cert_dir, dir, sizeof(g_cert_dir) - 1);
+    g_cert_dir[sizeof(g_cert_dir) - 1] = '\0';
+}
+
+static char *read_file(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (len <= 0) { fclose(f); return NULL; }
+    char *data = malloc(len + 1);
+    if (!data) { fclose(f); return NULL; }
+    size_t n = fread(data, 1, len, f);
+    fclose(f);
+    data[n] = '\0';
+    return data;
+}
+
+static char *compute_fingerprint(const char *cert_path) {
+    FILE *f = fopen(cert_path, "rb");
+    if (!f) return NULL;
+    X509 *cert = PEM_read_X509(f, NULL, NULL, NULL);
+    fclose(f);
+    if (!cert) return NULL;
+
+    unsigned char md[EVP_MAX_MD_SIZE];
+    unsigned int mdlen;
+    X509_digest(cert, EVP_sha256(), md, &mdlen);
+
+    // Format as SHA256:xx:xx:xx...
+    char *fp = malloc(mdlen * 3 + 8);
+    if (!fp) { X509_free(cert); return NULL; }
+    int pos = snprintf(fp, 8, "SHA256:");
+    for (unsigned int i = 0; i < mdlen; i++) {
+        pos += snprintf(fp + pos, 4, "%02x", md[i]);
+        if (i < mdlen - 1) fp[pos++] = ':';
+    }
+    fp[pos] = '\0';
+    X509_free(cert);
+    return fp;
+}
 
 static int streq(const char *a, const char *b) {
     return strcmp(a, b) == 0;
@@ -55,9 +105,12 @@ static void send_json(SSL *ssl, int status, const char *body) {
 }
 
 static void send_error(SSL *ssl, int status, const char *msg) {
-    char json[1024];
-    snprintf(json, sizeof(json), "{\"error\":\"%s\"}", msg);
-    send_json(ssl, status, json);
+    cJSON *e = cJSON_CreateObject();
+    cJSON_AddStringToObject(e, "error", msg);
+    char *s = cJSON_PrintUnformatted(e);
+    send_json(ssl, status, s);
+    free(s);
+    cJSON_Delete(e);
 }
 
 void send_chunk(SSL *ssl, const char *data, size_t len) {
@@ -83,44 +136,92 @@ static int stream_callback(const char *data, size_t len, int is_stderr, void *us
     return 0;
 }
 
+static char **parse_env(cJSON *req, int *env_count) {
+    *env_count = 0;
+    cJSON *env_obj = cJSON_GetObjectItem(req, "env");
+    if (!env_obj || !cJSON_IsObject(env_obj)) return NULL;
+
+    char **env = malloc(sizeof(char *) * MAX_ENV);
+    if (!env) return NULL;
+
+    cJSON *entry = NULL;
+    cJSON_ArrayForEach(entry, env_obj) {
+        if (*env_count >= MAX_ENV) break;
+        if (!cJSON_IsString(entry) || !entry->string || !entry->valuestring) continue;
+
+        size_t klen = strlen(entry->string);
+        size_t vlen = strlen(entry->valuestring);
+        env[*env_count] = malloc(klen + 1 + vlen + 1);
+        if (!env[*env_count]) continue;
+        memcpy(env[*env_count], entry->string, klen);
+        env[*env_count][klen] = '=';
+        memcpy(env[*env_count] + klen + 1, entry->valuestring, vlen);
+        env[*env_count][klen + 1 + vlen] = '\0';
+        (*env_count)++;
+    }
+    return env;
+}
+
+static void free_env(char **env, int env_count) {
+    if (!env) return;
+    for (int i = 0; i < env_count; i++) free(env[i]);
+    free(env);
+}
+
 static void handle_exec(SSL *ssl, const char *body, size_t body_len) {
     (void)body_len;
-    json_value_t *req = json_parse(body);
+    cJSON *req = cJSON_Parse(body);
     if (!req) { send_error(ssl, 400, "invalid JSON"); return; }
 
-    const char *cmd = json_get_string(req, "command");
-    if (!cmd) { json_free(req); send_error(ssl, 400, "missing 'command' field"); return; }
+    cJSON *cmd_item = cJSON_GetObjectItem(req, "command");
+    if (!cmd_item || !cJSON_IsString(cmd_item)) {
+        cJSON_Delete(req);
+        send_error(ssl, 400, "missing 'command' field");
+        return;
+    }
+
+    int env_count = 0;
+    char **env = parse_env(req, &env_count);
 
     exec_result_t result;
-    if (exec_run(cmd, &result) < 0) {
-        json_free(req);
+    if (exec_run(cmd_item->valuestring, env, env_count, &result) < 0) {
+        free_env(env, env_count);
+        cJSON_Delete(req);
         send_error(ssl, 500, "execution failed");
         return;
     }
 
-    json_value_t *r = json_new_object();
-    json_add_string(r, "stdout", result.stdout_data ? result.stdout_data : "");
-    json_add_string(r, "stderr", result.stderr_data ? result.stderr_data : "");
-    json_add_number(r, "exit_code", result.exit_code);
-    char *s = json_serialize(r);
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddStringToObject(r, "stdout", result.stdout_data ? result.stdout_data : "");
+    cJSON_AddStringToObject(r, "stderr", result.stderr_data ? result.stderr_data : "");
+    cJSON_AddNumberToObject(r, "exit_code", (double)result.exit_code);
+    char *s = cJSON_PrintUnformatted(r);
     send_json(ssl, 200, s);
     free(s);
-    json_free(r);
+    cJSON_Delete(r);
     exec_free_result(&result);
-    json_free(req);
+    free_env(env, env_count);
+    cJSON_Delete(req);
 }
 
 static void handle_exec_stream(SSL *ssl, const char *body, size_t body_len) {
     (void)body_len;
-    json_value_t *req = json_parse(body);
+    cJSON *req = cJSON_Parse(body);
     if (!req) { send_error(ssl, 400, "invalid JSON"); return; }
 
-    const char *cmd = json_get_string(req, "command");
-    if (!cmd) { json_free(req); send_error(ssl, 400, "missing 'command' field"); return; }
+    cJSON *cmd_item = cJSON_GetObjectItem(req, "command");
+    if (!cmd_item || !cJSON_IsString(cmd_item)) {
+        cJSON_Delete(req);
+        send_error(ssl, 400, "missing 'command' field");
+        return;
+    }
+
+    int env_count = 0;
+    char **env = parse_env(req, &env_count);
 
     send_chunked_headers(ssl);
 
-    int exit_code = exec_run_stream(cmd, stream_callback, ssl);
+    int exit_code = exec_run_stream(cmd_item->valuestring, env, env_count, stream_callback, ssl);
 
     char final_msg[256];
     int n = snprintf(final_msg, sizeof(final_msg),
@@ -128,7 +229,8 @@ static void handle_exec_stream(SSL *ssl, const char *body, size_t body_len) {
     send_chunk(ssl, final_msg, n);
     send_chunk_final(ssl);
 
-    json_free(req);
+    free_env(env, env_count);
+    cJSON_Delete(req);
 }
 
 void handle_upload(SSL *ssl, const char *query, long content_length) {
@@ -161,12 +263,109 @@ void handle_upload(SSL *ssl, const char *query, long content_length) {
     }
     fclose(f);
 
-    json_value_t *r = json_new_object();
-    json_add_number(r, "bytes_written", written);
-    char *s = json_serialize(r);
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddNumberToObject(r, "bytes_written", (double)written);
+    char *s = cJSON_PrintUnformatted(r);
     send_json(ssl, 200, s);
     free(s);
-    json_free(r);
+    cJSON_Delete(r);
+}
+
+void handle_exec_pipe(SSL *ssl, const char *query, long content_length, int chunked) {
+    // Parse command from query
+    const char *q = query;
+    const char *cmd = NULL;
+    size_t cmd_len = 0;
+    char env_keys[MAX_ENV][256];
+    char env_vals[MAX_ENV][256];
+    int env_count = 0;
+    int raw = 0;
+
+    while (q && *q) {
+        const char *amp = strchr(q, '&');
+        size_t seg_len = amp ? (size_t)(amp - q) : strlen(q);
+
+        if (strncmp(q, "command=", 8) == 0 && seg_len > 8) {
+            cmd = q + 8;
+            cmd_len = seg_len - 8;
+        } else if (strncmp(q, "raw=1", 5) == 0 && seg_len == 5) {
+            raw = 1;
+        } else if (strncmp(q, "env_", 4) == 0 && env_count < MAX_ENV) {
+            const char *eq = q + 4;
+            const char *eq_end = memchr(eq, '=', seg_len - 4);
+            if (eq_end) {
+                size_t klen = eq_end - eq;
+                size_t vlen = seg_len - 4 - klen - 1;
+                if (klen < sizeof(env_keys[env_count]) && vlen < sizeof(env_vals[env_count])) {
+                    memcpy(env_keys[env_count], eq, klen);
+                    env_keys[env_count][klen] = '\0';
+                    memcpy(env_vals[env_count], eq_end + 1, vlen);
+                    env_vals[env_count][vlen] = '\0';
+                    env_count++;
+                }
+            }
+        }
+
+        q = amp ? amp + 1 : NULL;
+    }
+
+    if (!cmd || cmd_len == 0) {
+        send_error(ssl, 400, "missing 'command' query parameter");
+        return;
+    }
+
+    // URL-decode command into a buffer
+    char cmd_buf[4096];
+    size_t ci = 0;
+    for (size_t i = 0; i < cmd_len && ci < sizeof(cmd_buf) - 1; i++) {
+        if (cmd[i] == '%' && i + 2 < cmd_len) {
+            char hex[3] = { cmd[i+1], cmd[i+2], '\0' };
+            cmd_buf[ci++] = (char)strtol(hex, NULL, 16);
+            i += 2;
+        } else if (cmd[i] == '+') {
+            cmd_buf[ci++] = ' ';
+        } else {
+            cmd_buf[ci++] = cmd[i];
+        }
+    }
+    cmd_buf[ci] = '\0';
+
+    // Build env array
+    char **env = NULL;
+    if (env_count > 0) {
+        env = malloc(sizeof(char *) * env_count);
+        for (int i = 0; i < env_count; i++) {
+            size_t klen = strlen(env_keys[i]);
+            size_t vlen = strlen(env_vals[i]);
+            env[i] = malloc(klen + 1 + vlen + 1);
+            memcpy(env[i], env_keys[i], klen);
+            env[i][klen] = '=';
+            memcpy(env[i] + klen + 1, env_vals[i], vlen);
+            env[i][klen + 1 + vlen] = '\0';
+        }
+    }
+
+    // Send chunked response headers
+    const char *hdr = raw ?
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: application/octet-stream\r\n"
+        "Transfer-Encoding: chunked\r\n"
+        "Cache-Control: no-cache\r\n"
+        "Connection: keep-alive\r\n"
+        "\r\n"
+        :
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/event-stream\r\n"
+        "Transfer-Encoding: chunked\r\n"
+        "Cache-Control: no-cache\r\n"
+        "Connection: keep-alive\r\n"
+        "\r\n";
+    SSL_write(ssl, hdr, strlen(hdr));
+
+    exec_run_pipe(cmd_buf, env, env_count, ssl, content_length, chunked, raw);
+
+    for (int i = 0; i < env_count; i++) free(env[i]);
+    free(env);
 }
 
 static void handle_download(SSL *ssl, const char *query) {
@@ -214,19 +413,47 @@ static void handle_download(SSL *ssl, const char *query) {
 }
 
 static void handle_health(SSL *ssl) {
-    json_value_t *r = json_new_object();
-    json_add_string(r, "status", "ok");
-    json_add_string(r, "version", PACKAGE_VERSION);
-    char *s = json_serialize(r);
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddStringToObject(r, "status", "ok");
+    cJSON_AddStringToObject(r, "version", PACKAGE_VERSION);
+    char *s = cJSON_PrintUnformatted(r);
     send_json(ssl, 200, s);
     free(s);
-    json_free(r);
+    cJSON_Delete(r);
+}
+
+static void handle_certinfo(SSL *ssl) {
+    char ca_path[1024], cert_path[1024];
+    snprintf(ca_path, sizeof(ca_path), "%s/ca.crt", g_cert_dir);
+    snprintf(cert_path, sizeof(cert_path), "%s/client.crt", g_cert_dir);
+
+    char *ca_pem = read_file(ca_path);
+    char *client_pem = read_file(cert_path);
+    char *fingerprint = compute_fingerprint(ca_path);
+
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddStringToObject(r, "ca_pem", ca_pem ? ca_pem : "");
+    cJSON_AddStringToObject(r, "client_cert_pem", client_pem ? client_pem : "");
+    cJSON_AddStringToObject(r, "fingerprint", fingerprint ? fingerprint : "");
+    char *s = cJSON_PrintUnformatted(r);
+    send_json(ssl, 200, s);
+    free(s);
+    cJSON_Delete(r);
+
+    free(ca_pem);
+    free(client_pem);
+    free(fingerprint);
 }
 
 int handle_request(SSL *ssl, const char *method, const char *path,
                    const char *query, const char *body, size_t body_len) {
     if (streq(path, "/api/health") && streq(method, "GET")) {
         handle_health(ssl);
+        return 1;
+    }
+
+    if (streq(path, "/api/certinfo") && streq(method, "GET")) {
+        handle_certinfo(ssl);
         return 1;
     }
 

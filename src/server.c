@@ -78,6 +78,15 @@ static long get_content_length(const char *headers) {
     return atol(cl);
 }
 
+static int is_chunked(const char *headers) {
+    const char *te = strstr(headers, "Transfer-Encoding:");
+    if (!te) te = strstr(headers, "transfer-encoding:");
+    if (!te) return 0;
+    te += 18; // skip "Transfer-Encoding:" (18 chars including colon)
+    while (*te == ' ') te++;
+    return strncmp(te, "chunked", 7) == 0;
+}
+
 static void send_http_response(SSL *ssl, int status, const char *status_text,
                                 const char *content_type, const char *body, size_t body_len) {
     char buf[4096];
@@ -159,8 +168,25 @@ static void *handle_client(void *arg) {
 
     long content_length = get_content_length(buf);
 
+    // Handle Expect: 100-continue — send 100 Continue before any body-reading
+    // endpoint so the client starts sending the request body
+    if (strcmp(method, "POST") == 0 &&
+        (strstr(buf, "Expect: 100-continue") || strstr(buf, "expect: 100-continue"))) {
+        SSL_write(ssl, "HTTP/1.1 100 Continue\r\n\r\n", 25);
+    }
+
     if (strcmp(path, "/api/upload") == 0 && strcmp(method, "POST") == 0) {
         handle_upload(ssl, query, content_length);
+        SSL_shutdown(ssl);
+        SSL_free(ssl);
+        close(job->fd);
+        free(job);
+        return NULL;
+    }
+
+    int chunked = is_chunked(buf);
+    if (strcmp(path, "/api/exec/pipe") == 0 && strcmp(method, "POST") == 0) {
+        handle_exec_pipe(ssl, query, content_length, chunked);
         SSL_shutdown(ssl);
         SSL_free(ssl);
         close(job->fd);

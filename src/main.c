@@ -1,5 +1,6 @@
 #include "tls.h"
 #include "server.h"
+#include "handler.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -212,6 +213,7 @@ int main(int argc, char *argv[]) {
         printf("Certificates: %s\n", cert_dir);
     }
 
+    handler_set_cert_dir(cert_dir);
     server_start(&g_server);
 
     SSL_CTX_free(ctx);

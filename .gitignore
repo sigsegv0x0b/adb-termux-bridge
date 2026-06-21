@@ -6,3 +6,4 @@ src/certs_data.h
 *.swp
 *~
 .TMPDIR/
+testload

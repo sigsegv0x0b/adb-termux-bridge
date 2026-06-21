@@ -180,6 +180,99 @@ test_exit_only       "08) uptime (non-deterministic)"   'uptime' 0
 test_streaming       "09) streaming exec"               'echo hello'
 test_mtls_reject     "10) mTLS rejection"
 
+# 11) Pipe: no body (cat file)
+echo "11) pipe: no body (cat file)"
+echo "pipe test file content" > "$TESTDIR/pipe_test.txt"
+resp=$(curl -s -N --cacert "$CA_CERT" --cert "$CLIENT_CERT" --key "$CLIENT_KEY" \
+    -X POST -H "Content-Length: 0" \
+    "$API/api/exec/pipe?command=cat%20$TESTDIR/pipe_test.txt" 2>/dev/null)
+if echo "$resp" | grep -q "pipe test file content" && echo "$resp" | grep -q '"exit_code":0'; then
+    pass ""
+else
+    fail "  pipe no body failed: $resp"
+fi
+
+# 12) Pipe: Content-Length body
+echo "12) pipe: Content-Length body"
+resp=$(curl -s -N --cacert "$CA_CERT" --cert "$CLIENT_CERT" --key "$CLIENT_KEY" \
+    -X POST -d "hello from content-length" \
+    "$API/api/exec/pipe?command=cat" 2>/dev/null)
+if echo "$resp" | grep -q "hello from content-length" && echo "$resp" | grep -q '"exit_code":0'; then
+    pass ""
+else
+    fail "  pipe content-length failed: $resp"
+fi
+
+# 13) Pipe: chunked body
+echo "13) pipe: chunked body"
+resp=$(echo "hello from chunked" | curl -s -N --cacert "$CA_CERT" --cert "$CLIENT_CERT" --key "$CLIENT_KEY" \
+    -X POST -H "Transfer-Encoding: chunked" -T - \
+    "$API/api/exec/pipe?command=cat" 2>/dev/null)
+if echo "$resp" | grep -q "hello from chunked" && echo "$resp" | grep -q '"exit_code":0'; then
+    pass ""
+else
+    fail "  pipe chunked failed: $resp"
+fi
+
+# 14) Pipe: dd with stderr
+echo "14) pipe: dd with stderr"
+resp=$(curl -s -N --cacert "$CA_CERT" --cert "$CLIENT_CERT" --key "$CLIENT_KEY" \
+    -X POST -d "dd test data" \
+    "$API/api/exec/pipe?command=dd%20bs%3D1024" 2>/dev/null)
+if echo "$resp" | grep -q "dd test data" && echo "$resp" | grep -q "records out" && echo "$resp" | grep -q '"exit_code":0'; then
+    pass ""
+else
+    fail "  pipe dd failed: $resp"
+fi
+
+# 15) Certinfo endpoint
+echo "15) certinfo endpoint"
+resp=$(curl -s --cacert "$CA_CERT" --cert "$CLIENT_CERT" --key "$CLIENT_KEY" \
+    "$API/api/certinfo" 2>/dev/null)
+if echo "$resp" | grep -q '"ca_pem"' && echo "$resp" | grep -q '"client_cert_pem"' && echo "$resp" | grep -q '"fingerprint":"SHA256:'; then
+    pass ""
+else
+    fail "  certinfo failed: $resp"
+fi
+
+# 16) Raw pipe: upload + download with checksum verification
+# Helper: generate testload, pipe through bridge, verify checksum
+test_raw_pipe() {
+    local name="$1" size="$2" direction="$3"
+    local testload="$TESTDIR/raw_${size}_${direction}.bin"
+    local recv="$TESTDIR/recv_${size}_${direction}.bin"
+    dd if=/dev/urandom bs=1 count="$size" of="$testload" 2>/dev/null
+    local s1; s1=$(sha256sum "$testload" | cut -d' ' -f1)
+
+    if [[ "$direction" == "up" ]]; then
+        # local → device: cat testload | pipe --raw 'cat > recv'
+        BRIDGE_CERT_DIR="$TESTDIR" BRIDGE_PORT="$PORT" \
+            "$BRIDGE_DIR/adb-termux.sh" pipe --raw "cat > $recv" \
+            < "$testload" > /dev/null 2>/dev/null || true
+    else
+        # device → local: pipe --raw 'cat testload' > recv
+        BRIDGE_CERT_DIR="$TESTDIR" BRIDGE_PORT="$PORT" \
+            "$BRIDGE_DIR/adb-termux.sh" pipe --raw "cat $testload" \
+            > "$recv" 2>/dev/null || true
+    fi
+
+    local s2; s2=$(sha256sum "$recv" 2>/dev/null | cut -d' ' -f1)
+    if [[ "$s1" == "$s2" && -n "$s2" ]]; then
+        pass "  ${name} (${size}B ${direction})"
+    else
+        fail "  ${name} (${size}B ${direction}): ${s1:0:16}.. vs ${s2:-MISSING}"
+    fi
+}
+
+echo "16) raw pipe: binary transfer with checksum verification"
+for dir in up down; do
+    test_raw_pipe "raw pipe" 1         "$dir"
+    test_raw_pipe "raw pipe" 100       "$dir"
+    test_raw_pipe "raw pipe" 65000     "$dir"
+    test_raw_pipe "raw pipe" 65536     "$dir"
+    test_raw_pipe "raw pipe" 1048576   "$dir"
+done
+
 echo ""
 echo "=== Results ==="
 [[ $FAIL_COUNT -eq 0 ]] && echo "All tests passed!" || echo "$FAIL_COUNT test(s) failed"
