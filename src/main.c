@@ -1,6 +1,7 @@
 #include "tls.h"
 #include "server.h"
 #include "handler.h"
+#include "forward.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -222,6 +223,7 @@ int main(int argc, char *argv[]) {
     handler_set_listen_fd(-1);
     server_start(&g_server);
 
+    forward_shutdown_all();
     SSL_CTX_free(ctx);
     X509_free(ca_cert);
     X509_free(server_cert);

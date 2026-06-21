@@ -1,6 +1,7 @@
 #include "handler.h"
 #include "executor.h"
 #include "cJSON.h"
+#include "forward.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -618,6 +619,86 @@ static void handle_certinfo(SSL *ssl) {
     free(fingerprint);
 }
 
+void handle_tcpforward_get(SSL *ssl) {
+    char buf[8192];
+    forward_list_json(buf, sizeof(buf));
+    send_json(ssl, 200, buf);
+}
+
+void handle_tcpforward_post(SSL *ssl, const char *body, size_t body_len) {
+    (void)body_len;
+    cJSON *req = cJSON_Parse(body);
+    if (!req) { send_json(ssl, 400, "{\"error\":\"invalid JSON\"}"); return; }
+
+    cJSON *path_item = cJSON_GetObjectItem(req, "unix_path");
+    if (!path_item || !cJSON_IsString(path_item)) {
+        cJSON_Delete(req);
+        send_json(ssl, 400, "{\"error\":\"missing 'unix_path'\"}");
+        return;
+    }
+    const char *unix_path = path_item->valuestring;
+
+    cJSON *host_item = cJSON_GetObjectItem(req, "host");
+    const char *host = (host_item && cJSON_IsString(host_item)) ? host_item->valuestring : "127.0.0.1";
+
+    cJSON *port_item = cJSON_GetObjectItem(req, "port");
+    if (!port_item || !cJSON_IsNumber(port_item)) {
+        cJSON_Delete(req);
+        send_json(ssl, 400, "{\"error\":\"missing 'port'\"}");
+        return;
+    }
+    int port = (int)port_item->valuedouble;
+
+    cJSON *secure_item = cJSON_GetObjectItem(req, "secure");
+    int secure = (secure_item && cJSON_IsBool(secure_item)) ? cJSON_IsTrue(secure_item) : 0;
+
+    cJSON_Delete(req);
+
+    int id = forward_add(unix_path, host, port, secure);
+    if (id < 0) {
+        const char *err;
+        switch (id) {
+            case -1: err = "port already in use on this host"; break;
+            case -2: err = "forward already exists for this unix_path:port"; break;
+            case -3: err = "max forwards reached"; break;
+            case -4: err = "socket creation failed"; break;
+            case -5: err = "bind failed"; break;
+            case -6: err = "listen failed"; break;
+            default: err = "unknown error"; break;
+        }
+        char ebuf[256];
+        snprintf(ebuf, sizeof(ebuf), "{\"error\":\"%s\"}", err);
+        send_json(ssl, 500, ebuf);
+        return;
+    }
+
+    char buf[512];
+    snprintf(buf, sizeof(buf),
+        "{\"id\":%d,\"unix_path\":\"%s\",\"host\":\"%s\",\"port\":%d,\"secure\":%s}",
+        id, unix_path, host, port, secure ? "true" : "false");
+    send_json(ssl, 200, buf);
+}
+
+void handle_tcpforward_delete(SSL *ssl, const char *query) {
+    if (!query || !startswith(query, "id=")) {
+        send_json(ssl, 400, "{\"error\":\"missing 'id' query parameter\"}");
+        return;
+    }
+
+    int id = atoi(query + 3);
+    if (id <= 0) {
+        send_json(ssl, 400, "{\"error\":\"invalid id\"}");
+        return;
+    }
+
+    if (forward_remove(id) < 0) {
+        send_json(ssl, 404, "{\"error\":\"forward not found\"}");
+        return;
+    }
+
+    send_json(ssl, 200, "{\"status\":\"ok\"}");
+}
+
 int handle_request(SSL *ssl, const char *method, const char *path,
                    const char *query, const char *body, size_t body_len) {
     if (streq(path, "/api/health") && streq(method, "GET")) {
@@ -651,6 +732,19 @@ int handle_request(SSL *ssl, const char *method, const char *path,
 
     if (streq(path, "/api/download") && streq(method, "GET")) {
         handle_download(ssl, query);
+        return 1;
+    }
+
+    if (streq(path, "/api/tcpforward") && streq(method, "GET")) {
+        handle_tcpforward_get(ssl);
+        return 1;
+    }
+    if (streq(path, "/api/tcpforward") && streq(method, "POST")) {
+        handle_tcpforward_post(ssl, body, body_len);
+        return 1;
+    }
+    if (streq(path, "/api/tcpforward") && streq(method, "DELETE")) {
+        handle_tcpforward_delete(ssl, query);
         return 1;
     }
 
