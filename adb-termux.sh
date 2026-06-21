@@ -23,6 +23,10 @@ Commands:
                                             (--raw for binary, no stderr)
   push <src> <dst>                    Upload file to device
   pull <src>                          Download file from device
+  forward add <unix> <host:port>     Forward a Unix socket to TCP
+       [--secure]                      @ for abstract sockets (CDP)
+  forward list                        List all active forwards
+  forward remove <id>                 Tear down a forward
   health                              Check bridge health
   uptime                              Show server uptime
   certinfo                            Show certificate info
@@ -39,6 +43,11 @@ Examples:
   adb-termux pipe 'dd if=/dev/block/mmcblk0 bs=4k count=100' > backup.img
   adb-termux push ~/file.txt /sdcard/file.txt
   adb-termux pull /sdcard/file.txt
+  adb-termux forward add /data/local/tmp/socket 127.0.0.1:9222
+  adb-termux forward add @chrome_devtools_remote 127.0.0.1:9222
+  adb-termux forward add @chrome_devtools_remote 127.0.0.1:9223 --secure
+  adb-termux forward list
+  adb-termux forward remove 1
   adb-termux certinfo
 EOF
         exit 0
@@ -321,6 +330,69 @@ case "$1" in
         src="$2"
         curl_bridge GET "/api/download?path=$src"
         echo
+        ;;
+
+    forward)
+        shift
+        case "$1" in
+            add)
+                shift
+                if [ $# -lt 2 ]; then
+                    echo "Usage: adb-termux forward add <unix_path> <host:port> [--secure]" >&2
+                    echo "  unix_path: filesystem path or @abstract_socket_name" >&2
+                    echo "  host:port: TCP listen address" >&2
+                    echo "  --secure:  wrap in mTLS (optional)" >&2
+                    echo ""
+                    echo "Examples:" >&2
+                    echo "  adb-termux forward add /data/local/tmp/sock 127.0.0.1:9222" >&2
+                    echo "  adb-termux forward add @chrome_devtools_remote 127.0.0.1:9222" >&2
+                    exit 1
+                fi
+                unix_path=""
+                target=""
+                secure="false"
+                for arg in "$@"; do
+                    case "$arg" in
+                        --secure) secure="true" ;;
+                        *) 
+                            if [ -z "$unix_path" ]; then unix_path="$arg"
+                            elif [ -z "$target" ]; then target="$arg"
+                            fi
+                            ;;
+                    esac
+                done
+                if [ -z "$unix_path" ] || [ -z "$target" ]; then
+                    echo "Usage: adb-termux forward add <unix_path> <host:port> [--secure]" >&2
+                    exit 1
+                fi
+                host="${target%:*}"
+                port="${target##*:}"
+                if [ -z "$host" ] || [ -z "$port" ] || [ "$host" = "$target" ]; then
+                    echo "Error: target must be host:port format" >&2
+                    exit 1
+                fi
+                json="{\"unix_path\":\"$unix_path\",\"host\":\"$host\",\"port\":$port,\"secure\":$secure}"
+                curl_bridge POST "/api/tcpforward" "$json"
+                echo
+                ;;
+            list)
+                curl_bridge GET "/api/tcpforward"
+                echo
+                ;;
+            remove)
+                if [ $# -lt 2 ]; then
+                    echo "Usage: adb-termux forward remove <id>" >&2
+                    exit 1
+                fi
+                curl_bridge DELETE "/api/tcpforward?id=$2"
+                echo
+                ;;
+            *)
+                echo "Unknown forward command: $1" >&2
+                echo "Usage: adb-termux forward {add|list|remove} [args]" >&2
+                exit 1
+                ;;
+        esac
         ;;
 
     health)
