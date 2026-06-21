@@ -196,7 +196,8 @@ int main(int argc, char *argv[]) {
     cert_paths_t paths;
     tls_build_paths(&paths, cert_dir);
 
-    SSL_CTX *ctx = tls_create_server_ctx(&paths);
+    X509 *ca_cert = NULL, *server_cert = NULL;
+    SSL_CTX *ctx = tls_create_server_ctx(&paths, &ca_cert, &server_cert);
     if (!ctx) {
         fprintf(stderr, "Failed to create SSL context\n");
         return 1;
@@ -216,10 +217,13 @@ int main(int argc, char *argv[]) {
     }
 
     handler_set_cert_dir(cert_dir);
+    handler_set_certs(ca_cert, server_cert);
     handler_set_argv(g_argv);
     handler_set_listen_fd(-1);
     server_start(&g_server);
 
     SSL_CTX_free(ctx);
+    X509_free(ca_cert);
+    X509_free(server_cert);
     return 0;
 }

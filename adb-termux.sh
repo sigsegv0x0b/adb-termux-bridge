@@ -25,7 +25,7 @@ Commands:
   pull <src>                          Download file from device
   health                              Check bridge health
   uptime                              Show server uptime
-  --certinfo                          Show certificate info
+  certinfo                            Show certificate info
   help                                Show this help
 
 Environment:
@@ -39,7 +39,7 @@ Examples:
   adb-termux pipe 'dd if=/dev/block/mmcblk0 bs=4k count=100' > backup.img
   adb-termux push ~/file.txt /sdcard/file.txt
   adb-termux pull /sdcard/file.txt
-  adb-termux --certinfo
+  adb-termux certinfo
 EOF
         exit 0
         ;;
@@ -200,16 +200,15 @@ parse_sse() {
 }
 
 case "$1" in
-    --certinfo)
+    certinfo)
         response=$(curl_bridge GET "/api/certinfo")
-        # Extract fields using sed (no python dependency)
         echo "Fingerprint: $(echo "$response" | sed 's/.*"fingerprint":"\([^"]*\)".*/\1/')"
         echo ""
         echo "CA Certificate:"
         echo "$response" | sed 's/.*"ca_pem":"\([^"]*\)".*/\1/' | sed 's/\\n/\n/g'
         echo ""
-        echo "Client Certificate:"
-        echo "$response" | sed 's/.*"client_cert_pem":"\([^"]*\)".*/\1/' | sed 's/\\n/\n/g'
+        echo "Server Certificate:"
+        echo "$response" | sed 's/.*"server_pem":"\([^"]*\)".*/\1/' | sed 's/\\n/\n/g'
         ;;
 
     shell|exec)

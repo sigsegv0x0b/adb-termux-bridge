@@ -219,7 +219,7 @@ static EVP_PKEY *load_server_key(const char *path) {
 }
 #endif
 
-SSL_CTX *tls_create_server_ctx(const cert_paths_t *paths) {
+SSL_CTX *tls_create_server_ctx(const cert_paths_t *paths, X509 **out_ca, X509 **out_cert) {
     SSL_CTX *ctx = SSL_CTX_new(TLS_server_method());
     if (!ctx) {
         fprintf(stderr, "SSL_CTX_new failed\n");
@@ -250,8 +250,8 @@ SSL_CTX *tls_create_server_ctx(const cert_paths_t *paths) {
     SSL_CTX_set_verify_depth(ctx, 1);
 
     EVP_PKEY_free(key);
-    X509_free(cert);
-    X509_free(ca);
+    if (out_ca) *out_ca = ca; else X509_free(ca);
+    if (out_cert) *out_cert = cert; else X509_free(cert);
     return ctx;
 
 fail:

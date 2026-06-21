@@ -17,7 +17,7 @@ typedef struct {
 int  tls_init(void);
 int  tls_generate_certs(const char *cert_dir);
 void tls_build_paths(cert_paths_t *paths, const char *cert_dir);
-SSL_CTX *tls_create_server_ctx(const cert_paths_t *paths);
+SSL_CTX *tls_create_server_ctx(const cert_paths_t *paths, X509 **out_ca, X509 **out_cert);
 
 int tls_print_cert(const char *cert_dir, FILE *out);
 int tls_print_ca(const char *cert_dir, FILE *out);

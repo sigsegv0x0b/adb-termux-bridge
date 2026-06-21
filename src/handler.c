@@ -21,11 +21,18 @@ static char g_cert_dir[1024] = "";
 static time_t g_start_time = 0;
 static char **g_argv = NULL;
 static int g_listen_fd = -1;
+static X509 *g_ca_cert = NULL;
+static X509 *g_server_cert = NULL;
 
 void handler_set_cert_dir(const char *dir) {
     strncpy(g_cert_dir, dir, sizeof(g_cert_dir) - 1);
     g_cert_dir[sizeof(g_cert_dir) - 1] = '\0';
     g_start_time = time(NULL);
+}
+
+void handler_set_certs(X509 *ca, X509 *server) {
+    g_ca_cert = ca;
+    g_server_cert = server;
 }
 
 void handler_set_argv(char **argv) {
@@ -34,45 +41,6 @@ void handler_set_argv(char **argv) {
 
 void handler_set_listen_fd(int fd) {
     g_listen_fd = fd;
-}
-
-static char *read_file(const char *path) {
-    FILE *f = fopen(path, "rb");
-    if (!f) return NULL;
-    fseek(f, 0, SEEK_END);
-    long len = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    if (len <= 0) { fclose(f); return NULL; }
-    char *data = malloc(len + 1);
-    if (!data) { fclose(f); return NULL; }
-    size_t n = fread(data, 1, len, f);
-    fclose(f);
-    data[n] = '\0';
-    return data;
-}
-
-static char *compute_fingerprint(const char *cert_path) {
-    FILE *f = fopen(cert_path, "rb");
-    if (!f) return NULL;
-    X509 *cert = PEM_read_X509(f, NULL, NULL, NULL);
-    fclose(f);
-    if (!cert) return NULL;
-
-    unsigned char md[EVP_MAX_MD_SIZE];
-    unsigned int mdlen;
-    X509_digest(cert, EVP_sha256(), md, &mdlen);
-
-    // Format as SHA256:xx:xx:xx...
-    char *fp = malloc(mdlen * 3 + 8);
-    if (!fp) { X509_free(cert); return NULL; }
-    int pos = snprintf(fp, 8, "SHA256:");
-    for (unsigned int i = 0; i < mdlen; i++) {
-        pos += snprintf(fp + pos, 4, "%02x", md[i]);
-        if (i < mdlen - 1) fp[pos++] = ':';
-    }
-    fp[pos] = '\0';
-    X509_free(cert);
-    return fp;
 }
 
 static int streq(const char *a, const char *b) {
@@ -602,18 +570,43 @@ static void handle_uptime(SSL *ssl) {
     cJSON_Delete(r);
 }
 
-static void handle_certinfo(SSL *ssl) {
-    char ca_path[1024], cert_path[1024];
-    snprintf(ca_path, sizeof(ca_path), "%s/ca.crt", g_cert_dir);
-    snprintf(cert_path, sizeof(cert_path), "%s/client.crt", g_cert_dir);
+static char *x509_to_pem_string(X509 *cert) {
+    if (!cert) return NULL;
+    BIO *bio = BIO_new(BIO_s_mem());
+    if (!bio) return NULL;
+    PEM_write_bio_X509(bio, cert);
+    char *data = NULL;
+    long len = BIO_get_mem_data(bio, &data);
+    char *pem = malloc(len + 1);
+    if (pem) { memcpy(pem, data, len); pem[len] = '\0'; }
+    BIO_free(bio);
+    return pem;
+}
 
-    char *ca_pem = read_file(ca_path);
-    char *client_pem = read_file(cert_path);
-    char *fingerprint = compute_fingerprint(ca_path);
+static char *fingerprint_from_x509(X509 *cert) {
+    if (!cert) return NULL;
+    unsigned char md[EVP_MAX_MD_SIZE];
+    unsigned int mdlen;
+    X509_digest(cert, EVP_sha256(), md, &mdlen);
+    char *fp = malloc(mdlen * 3 + 8);
+    if (!fp) return NULL;
+    int pos = snprintf(fp, 8, "SHA256:");
+    for (unsigned int i = 0; i < mdlen; i++) {
+        pos += snprintf(fp + pos, 4, "%02x", md[i]);
+        if (i < mdlen - 1) fp[pos++] = ':';
+    }
+    fp[pos] = '\0';
+    return fp;
+}
+
+static void handle_certinfo(SSL *ssl) {
+    char *ca_pem = g_ca_cert ? x509_to_pem_string(g_ca_cert) : NULL;
+    char *server_pem = g_server_cert ? x509_to_pem_string(g_server_cert) : NULL;
+    char *fingerprint = g_server_cert ? fingerprint_from_x509(g_server_cert) : NULL;
 
     cJSON *r = cJSON_CreateObject();
     cJSON_AddStringToObject(r, "ca_pem", ca_pem ? ca_pem : "");
-    cJSON_AddStringToObject(r, "client_cert_pem", client_pem ? client_pem : "");
+    cJSON_AddStringToObject(r, "server_pem", server_pem ? server_pem : "");
     cJSON_AddStringToObject(r, "fingerprint", fingerprint ? fingerprint : "");
     char *s = cJSON_PrintUnformatted(r);
     send_json(ssl, 200, s);
@@ -621,7 +614,7 @@ static void handle_certinfo(SSL *ssl) {
     cJSON_Delete(r);
 
     free(ca_pem);
-    free(client_pem);
+    free(server_pem);
     free(fingerprint);
 }
 

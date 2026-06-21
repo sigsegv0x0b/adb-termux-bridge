@@ -4,6 +4,7 @@
 #include <openssl/ssl.h>
 
 void handler_set_cert_dir(const char *dir);
+void handler_set_certs(X509 *ca, X509 *server);
 void handler_set_argv(char **argv);
 void handler_set_listen_fd(int fd);
 
