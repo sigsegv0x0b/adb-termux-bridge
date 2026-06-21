@@ -4,13 +4,33 @@ A lightweight HTTP-over-mTLS daemon that is **injected via ADB and runs as the A
 
 ## Quick start (one command)
 
+### Prerequisites
+
+- **Termux** with storage permission granted (`termux-setup-storage`)
+- **Wireless debugging** enabled on your Android device:
+
+  *Settings → Developer options → Wireless debugging*
+
+  If Developer options is hidden, go to *Settings → About phone* and tap **Build number** 7 times.
+
+  In Wireless debugging, tap **Pair device with pairing code** if you see it (Android 14+), or note the **IP address and port** shown at the top.
+
+### Run
+
 ```bash
 git clone https://github.com/sigsegv0x0b/adb-termux-bridge
 cd adb-termux-bridge
 ./fullsetup.sh
 ```
 
-This installs all dependencies, builds the secure binary, detects your device's IP, prompts for the ADB port, connects via wireless debugging, and injects the bridge. After it finishes, the bridge is running and ready to use — no desktop required.
+`fullsetup.sh` installs all dependencies, builds the secure binary, detects your device's IP, prompts for the ADB port, connects via wireless debugging, and injects the bridge. After it finishes, the bridge is running and ready to use — no desktop required.
+
+For `inject.sh` to work directly, you need an active ADB connection first:
+
+```bash
+adb connect <device-ip>:<port>
+./inject.sh
+```
 
 For manual setup or per-script workflows, see below.
 
