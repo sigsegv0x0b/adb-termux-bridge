@@ -140,12 +140,32 @@ void send_chunk_final(SSL *ssl) {
 
 static int stream_callback(const char *data, size_t len, int is_stderr, void *userdata) {
     SSL *ssl = (SSL *)userdata;
+    const char *prefix = is_stderr ? "[STDERR] " : "";
+    size_t prefix_len = is_stderr ? 9 : 0;
+
     char buf[4096];
-    int n = snprintf(buf, sizeof(buf), "data: %s%.*s\n\n", is_stderr ? "[STDERR] " : "", (int)len, data);
-    int hn = snprintf(buf + n, sizeof(buf) - n, "%zx\r\n", (size_t)n);
-    SSL_write(ssl, buf + n, hn);
-    SSL_write(ssl, buf, n);
-    SSL_write(ssl, "\r\n", 2);
+    size_t sse_overhead = 6 + prefix_len + 2 + 1;  // "data: " + prefix + "\n\n" + null
+    size_t max_piece = sizeof(buf) - sse_overhead;
+
+    size_t offset = 0;
+    while (offset < len) {
+        size_t piece = len - offset;
+        if (piece > max_piece) piece = max_piece;
+
+        int n = snprintf(buf, sizeof(buf), "data: %s%.*s\n\n",
+                         prefix, (int)piece, data + offset);
+        if (n < 0 || n >= (int)sizeof(buf)) break;
+
+        char size_line[32];
+        int sl = snprintf(size_line, sizeof(size_line), "%zx\r\n", (size_t)n);
+        if (sl > 0) {
+            SSL_write(ssl, size_line, sl);
+            SSL_write(ssl, buf, n);
+            SSL_write(ssl, "\r\n", 2);
+        }
+
+        offset += piece;
+    }
     return 0;
 }
 
